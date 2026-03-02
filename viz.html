@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<title>CNN · 3D Forward Pass</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;700&family=Orbitron:wght@400;700;900&display=swap');
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:100%;height:100%;overflow:hidden;background:#000209;font-family:'JetBrains Mono',monospace;}
+  canvas{display:block;position:fixed;inset:0;}
+  #hud{position:fixed;inset:0;pointer-events:none;z-index:10;}
+  #top-bar{
+    position:absolute;top:0;left:0;right:0;
+    display:flex;align-items:center;justify-content:space-between;
+    padding:18px 28px;
+    background:linear-gradient(to bottom,rgba(0,2,9,.95) 0%,transparent 100%);
+  }
+  #title{
+    font-family:'Orbitron',sans-serif;font-size:clamp(.8rem,2vw,1.05rem);
+    font-weight:700;letter-spacing:.2em;color:#c8e8ff;text-shadow:0 0 20px #0af8;
+  }
+  #pred-wrap{text-align:right;}
+  #pred-label{font-size:.58rem;color:#4af8;letter-spacing:.15em;text-transform:uppercase;}
+  #pred-char{
+    font-family:'Orbitron',sans-serif;font-size:2.4rem;font-weight:900;
+    color:#fff;line-height:1;text-shadow:0 0 30px #0cf,0 0 60px #0cf4;transition:text-shadow .6s;
+  }
+  #layer-info{position:absolute;bottom:105px;left:50%;transform:translateX(-50%);text-align:center;}
+  #layer-name{
+    font-family:'Orbitron',sans-serif;font-size:clamp(.85rem,2.2vw,1.25rem);
+    font-weight:700;color:#7df;letter-spacing:.12em;text-shadow:0 0 14px #0af;
+  }
+  #layer-shape{font-size:.66rem;color:#4af8;margin-top:4px;letter-spacing:.1em;}
+  #progress-wrap{position:absolute;bottom:78px;left:50%;transform:translateX(-50%);width:min(500px,80vw);}
+  #progress-dots{display:flex;gap:7px;justify-content:center;margin-bottom:7px;}
+  .dot{width:9px;height:9px;border-radius:50%;background:#0a1a2a;border:1px solid #1a3a5a;transition:all .4s;}
+  .dot.active{background:#00ccff;box-shadow:0 0 12px #0cf,0 0 24px #0cf4;border-color:#0cf;}
+  .dot.done{background:#005588;border-color:#0077aa;}
+  #pbar-wrap{height:2px;background:rgba(255,255,255,.05);border-radius:2px;overflow:hidden;}
+  #pbar{height:100%;width:0;background:linear-gradient(90deg,#0066ff,#00ffcc);transition:width .5s;box-shadow:0 0 8px #0ff;}
+  #controls{
+    position:absolute;bottom:20px;left:50%;transform:translateX(-50%);
+    display:flex;gap:10px;pointer-events:all;
+  }
+  .btn{
+    padding:10px 22px;border-radius:6px;border:1px solid rgba(0,160,255,.3);
+    background:rgba(0,8,24,.88);color:#88ccff;
+    font-family:'JetBrains Mono',monospace;font-size:.76rem;letter-spacing:.06em;
+    cursor:pointer;backdrop-filter:blur(8px);transition:all .2s;
+  }
+  .btn:hover{border-color:#0af;color:#fff;background:rgba(0,80,160,.3);box-shadow:0 0 14px #0af4;}
+  .btn.on{border-color:#0ff;color:#0ff;background:rgba(0,160,255,.12);box-shadow:0 0 16px #0ff6;}
+  #speed-wrap{
+    position:absolute;top:66px;right:28px;pointer-events:all;
+    display:flex;flex-direction:column;gap:4px;align-items:flex-end;
+  }
+  #speed-wrap label{font-size:.58rem;color:#4af8;letter-spacing:.1em;}
+  #speed-slider{width:110px;accent-color:#0af;cursor:pointer;}
+  #notice{
+    position:absolute;top:66px;left:28px;pointer-events:none;
+    font-size:.6rem;color:#1a4a6a;line-height:1.9;letter-spacing:.05em;
+  }
+  #tex-status{
+    position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    text-align:center;font-size:.8rem;color:#2a6a9a;letter-spacing:.08em;
+    transition:opacity .5s;
+  }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="top-bar">
+    <div id="title">CNN · 3D Forward Pass</div>
+    <div id="pred-wrap">
+      <div id="pred-label">Prediction</div>
+      <div id="pred-char">—</div>
+    </div>
+  </div>
+  <div id="layer-info">
+    <div id="layer-name">Ready</div>
+    <div id="layer-shape">Press ▶ Play — textures load from your last prediction</div>
+  </div>
+  <div id="progress-wrap">
+    <div id="progress-dots"></div>
+    <div id="pbar-wrap"><div id="pbar"></div></div>
+  </div>
+  <div id="controls">
+    <button class="btn" id="btn-play">▶ Play</button>
+    <button class="btn" id="btn-reset">↺ Reset</button>
+    <button class="btn on" id="btn-orbit">⟳ Orbit</button>
+  </div>
+  <div id="speed-wrap">
+    <label>SPEED</label>
+    <input type="range" id="speed-slider" min="0.3" max="3" step="0.1" value="1"/>
+  </div>
+  <div id="notice" id="notice">EMNIST-balanced · 47 classes<br>Conv×4 + FC×3</div>
+  <div id="tex-status">Loading…</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+
+const API = 'http://localhost:5000';
+
+/* ═══════════════════════════════════════════════════════════════
+   LAYER DEFINITIONS
+   gCols/gRows = grid layout of the activation PNG from save_activations (nrow=8)
+   show        = how many planes to render (subset for large layers)
+═══════════════════════════════════════════════════════════════ */
+const LAYERS = [
+  { label:'Input Image',    shape:'1 × 28 × 28',
+    url: ()=>`${API}/input/input.png?t=${Date.now()}`,
+    type:'conv', sp:28, show:1,  gCols:1,  gRows:1,  col:[0.0, 0.75, 1.0] },
+  { label:'Conv 1',         shape:'16 × 28 × 28',
+    url: ()=>`${API}/outputs/1_conv1.png?t=${Date.now()}`,
+    type:'conv', sp:28, show:16, gCols:8,  gRows:2,  col:[0.0, 0.55, 1.0] },
+  { label:'ConvStride 1',   shape:'32 × 14 × 14',
+    url: ()=>`${API}/outputs/2_convStride1.png?t=${Date.now()}`,
+    type:'conv', sp:14, show:16, gCols:8,  gRows:4,  col:[0.1, 0.35, 1.0] },
+  { label:'Conv 2',         shape:'64 × 14 × 14',
+    url: ()=>`${API}/outputs/3_conv2.png?t=${Date.now()}`,
+    type:'conv', sp:14, show:16, gCols:8,  gRows:8,  col:[0.38,0.15, 1.0] },
+  { label:'ConvStride 2',   shape:'128 × 7 × 7',
+    url: ()=>`${API}/outputs/4_convStride2.png?t=${Date.now()}`,
+    type:'conv', sp:7,  show:16, gCols:8,  gRows:16, col:[0.65,0.05, 1.0] },
+  { label:'FC 1  ·  512',   shape:'512 neurons',
+    url: ()=>`${API}/outputs/5_fc1.png?t=${Date.now()}`,
+    type:'fc',   show:48, col:[0.88,0.0,  0.72] },
+  { label:'FC 2  ·  256',   shape:'256 neurons',
+    url: ()=>`${API}/outputs/6_fc2.png?t=${Date.now()}`,
+    type:'fc',   show:32, col:[1.0, 0.0,  0.38] },
+  { label:'Output  ·  47',  shape:'47 class scores',
+    url: ()=>`${API}/outputs/7_fc3.png?t=${Date.now()}`,
+    type:'fc',   show:47, col:[1.0, 0.28, 0.0]  },
+];
+
+/* X positions along pipeline */
+const LX = [0, 8, 16, 24, 32, 41, 48.5, 55];
+
+/* ═══════════════════════════════════════════════════════════════
+   SCENE
+═══════════════════════════════════════════════════════════════ */
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000209, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog   = new THREE.FogExp2(0x000209, 0.008);
+
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.01, 600);
+camera.position.set(LX[3], 8, 26);
+camera.lookAt(LX[3], 0, 0);
+
+/* Lights */
+scene.add(new THREE.AmbientLight(0x050d1c, 5));
+const kL = new THREE.DirectionalLight(0xaaddff, 3);
+kL.position.set(4, 10, 8); scene.add(kL);
+const fL = new THREE.DirectionalLight(0x4400cc, 1.5);
+fL.position.set(30, 2,-5); scene.add(fL);
+/* two side-lights so planes lit from both directions */
+const sL1 = new THREE.DirectionalLight(0x0055ff, 1.2);
+sL1.position.set(1,0,0); scene.add(sL1);
+const sL2 = new THREE.DirectionalLight(0x0055ff, 1.2);
+sL2.position.set(-1,0,0); scene.add(sL2);
+
+/* Grid */
+const grid = new THREE.GridHelper(400, 120, 0x000c18, 0x000c18);
+grid.position.y = -6.5; scene.add(grid);
+
+/* Starfield */
+{
+  const N=2500, geo=new THREE.BufferGeometry();
+  const p=new Float32Array(N*3);
+  for(let i=0;i<N;i++){p[i*3]=(Math.random()-.5)*320;p[i*3+1]=(Math.random()-.5)*80;p[i*3+2]=(Math.random()-.5)*160;}
+  geo.setAttribute('position',new THREE.BufferAttribute(p,3));
+  scene.add(new THREE.Points(geo,new THREE.PointsMaterial({color:0x0c2236,size:.15,transparent:true,opacity:.55})));
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TEXTURE LOADING  (fresh every time Play pressed)
+═══════════════════════════════════════════════════════════════ */
+const texLoader = new THREE.TextureLoader();
+
+function loadTexFresh(url){
+  return new Promise(res=>{
+    texLoader.load(url, t=>{
+      t.minFilter = t.magFilter = THREE.LinearFilter;
+      res(t);
+    }, undefined, ()=>res(null));
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LAYER STATE
+═══════════════════════════════════════════════════════════════ */
+let layerGroups = [];   // THREE.Group per layer (rebuilt on each Play)
+let layerItems  = [];   // [{mesh, edge, targetOpacity, _animating, _startTime, _duration}]
+let built       = false;
+
+const layerGlow = LAYERS.map(()=>0);
+
+/* ═══════════════════════════════════════════════════════════════
+   BUILD LAYERS  (called when Play starts, loads fresh textures)
+═══════════════════════════════════════════════════════════════ */
+const BASE_SZ = 4.4;      // plane size for a 28×28 conv layer
+const Z_STEP  = 0.26;     // z-gap between stacked planes
+
+function planeSize(L){ return BASE_SZ*(L.sp/28)+0.9; }
+
+async function buildAllLayers(){
+  /* destroy previous */
+  layerGroups.forEach(g=>scene.remove(g));
+  layerGroups = [];
+  layerItems  = [];
+
+  document.getElementById('tex-status').textContent='Loading activation images…';
+  document.getElementById('tex-status').style.opacity='1';
+
+  for(let i=0;i<LAYERS.length;i++){
+    const L   = LAYERS[i];
+    const tex  = await loadTexFresh(L.url());   // fresh URL with timestamp
+    const grp  = new THREE.Group();
+    grp.position.set(LX[i], 0, 0);
+    grp.visible = false;
+    const col  = new THREE.Color(...L.col);
+    const items= [];
+
+    if(L.type==='conv'){
+      const sz     = planeSize(L);
+      const n      = L.show;
+      const totalZ = (n-1)*Z_STEP;
+
+      /* bounding box (appears first, before planes) */
+      {
+        const bGeo = new THREE.BoxGeometry(0.04, sz, totalZ+0.1);
+        const bEdge= new THREE.EdgesGeometry(bGeo);
+        const bMat = new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0});
+        const bMesh= new THREE.LineSegments(bEdge,bMat);
+        grp.add(bMesh);
+        items.push({mesh:bMesh, edge:null, targetOpacity:0.55, _animating:false});
+      }
+
+      for(let c=0;c<n;c++){
+        const z = c*Z_STEP - totalZ/2;
+
+        /* ── KEY FIX: PlaneGeometry rotated 90° around Y so it faces the X axis ── */
+        const geo = new THREE.PlaneGeometry(sz, sz);
+
+        /* UV remap: pick this channel's tile from the grid texture */
+        if(tex && L.gCols>0){
+          const uv = geo.attributes.uv;
+          const ci = c % L.gCols, ri = Math.floor(c/L.gCols);
+          const uW = 1/L.gCols, uH = 1/L.gRows;
+          const u0=ci*uW+uW*.015, u1=u0+uW*.97;
+          const v0=1-ri*uH-uH*.015, v1=v0-uH*.97;
+          uv.setXY(0,u0,v0); uv.setXY(1,u1,v0);
+          uv.setXY(2,u0,v1); uv.setXY(3,u1,v1);
+          uv.needsUpdate=true;
+        }
+
+        const alpha = 0.5+(c/n)*0.38;
+        const mat = new THREE.MeshStandardMaterial({
+          map: tex||null,
+          color: tex?0xffffff:col,
+          transparent:true, opacity:0,
+          side:THREE.DoubleSide, depthWrite:false,
+          emissive:col, emissiveIntensity:tex?.04:.35,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        /* ← ROTATE so face points along X (toward camera when orbiting side-on) */
+        mesh.rotation.y = Math.PI/2;
+        mesh.position.z = z;
+
+        /* thin edge frame — also rotated */
+        const eGeo = new THREE.EdgesGeometry(geo);
+        const eMat = new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0});
+        const edge = new THREE.LineSegments(eGeo,eMat);
+        edge.rotation.y = Math.PI/2;
+        edge.position.z = z;
+
+        grp.add(mesh); grp.add(edge);
+        items.push({mesh, edge, targetOpacity:alpha, _animating:false});
+      }
+
+    } else {
+      /* FC: column of thin neuron blocks, rotated to face along X */
+      const n  = L.show;
+      const H  = 6.0;
+      const nH = (H/n)*0.82;
+
+      for(let c=0;c<n;c++){
+        const y = (c/(n-1||1))*H - H/2;
+        const geo = new THREE.BoxGeometry(0.06, nH, 0.30);
+
+        const mat = new THREE.MeshStandardMaterial({
+          color: tex?0xffffff:col, map:tex||null,
+          transparent:true, opacity:0,
+          emissive:col, emissiveIntensity:tex?.12:.5,
+        });
+
+        /* remap UV so each neuron samples the right column of the FC image */
+        if(tex){
+          const uv=geo.attributes.uv;
+          const u0=c/n, u1=(c+1)/n;
+          for(let v=0;v<uv.count;v++) uv.setX(v, v%2===0?u0:u1);
+          uv.needsUpdate=true;
+        }
+
+        const mesh=new THREE.Mesh(geo,mat);
+        mesh.position.y=y;
+        grp.add(mesh);
+        items.push({mesh, edge:null, targetOpacity:0.90, _animating:false});
+      }
+    }
+
+    scene.add(grp);
+    layerGroups.push(grp);
+    layerItems.push(items);
+  }
+
+  document.getElementById('tex-status').style.opacity='0';
+  setTimeout(()=>document.getElementById('tex-status').textContent='',600);
+  built=true;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   FLOW PARTICLES
+═══════════════════════════════════════════════════════════════ */
+const N_FLOW=200;
+const fGeo=new THREE.BufferGeometry();
+const fPos=new Float32Array(N_FLOW*3);
+fGeo.setAttribute('position',new THREE.BufferAttribute(fPos,3));
+const flowPts=new THREE.Points(fGeo,
+  new THREE.PointsMaterial({color:0x00eeff,size:.16,transparent:true,opacity:.85,depthWrite:false}));
+scene.add(flowPts);
+const fState=Array.from({length:N_FLOW},()=>({active:false,t:0,spd:.014,from:0,to:1,sy:0,sz:0}));
+
+function spawnFlow(from,to,n=24){
+  let s=0;
+  for(let i=0;i<N_FLOW&&s<n;i++){
+    if(!fState[i].active){
+      Object.assign(fState[i],{active:true,t:Math.random()*.15,
+        spd:.01+Math.random()*.016,from,to,
+        sy:(Math.random()-.5)*2.5,sz:(Math.random()-.5)*4});
+      s++;
+    }
+  }
+}
+function tickFlow(){
+  for(let i=0;i<N_FLOW;i++){
+    const f=fState[i];
+    if(!f.active){fPos[i*3]=fPos[i*3+1]=fPos[i*3+2]=1e9;continue;}
+    f.t+=f.spd;
+    if(f.t>=1){f.active=false;continue;}
+    const ax=LX[f.from],bx=LX[Math.min(f.to,LAYERS.length-1)];
+    const e=f.t*f.t*(3-2*f.t);
+    fPos[i*3]  =ax+(bx-ax)*e;
+    fPos[i*3+1]=f.sy*Math.sin(Math.PI*f.t);
+    fPos[i*3+2]=f.sz*Math.sin(Math.PI*f.t);
+  }
+  fGeo.attributes.position.needsUpdate=true;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SEQUENCE
+═══════════════════════════════════════════════════════════════ */
+let playing  = false;
+let curLayer = -1;
+let layerT   = 0;
+const spd    = ()=>parseFloat(document.getElementById('speed-slider').value);
+const LDUR   = ()=>2.0/spd();
+
+/* dots */
+function buildDots(){
+  const w=document.getElementById('progress-dots');
+  w.innerHTML='';
+  LAYERS.forEach((_,i)=>{
+    const d=document.createElement('div');
+    d.className='dot';d.id=`dot${i}`;w.appendChild(d);
+  });
+}
+buildDots();
+function syncDots(a){
+  LAYERS.forEach((_,i)=>{
+    document.getElementById(`dot${i}`).className=
+      'dot'+(i===a?' active':i<a?' done':'');
+  });
+  document.getElementById('pbar').style.width=
+    (a<0?0:(a/(LAYERS.length-1))*100)+'%';
+}
+
+function revealLayer(idx){
+  const grp=layerGroups[idx], items=layerItems[idx];
+  if(!grp) return;
+  grp.visible=true;
+  layerGlow[idx]=1.0;
+
+  const s=spd();
+  /* bbox first (item 0), then planes with stagger */
+  items.forEach((item,pi)=>{
+    const delay=pi===0?0:120+pi*(60/s);
+    setTimeout(()=>{
+      item._animating=true;
+      item._startTime=performance.now();
+      item._duration =650/s;
+    },delay);
+  });
+
+  orbitCenter.set(LX[idx],0,0);
+
+  const L=LAYERS[idx];
+  document.getElementById('layer-name').textContent=L.label;
+  document.getElementById('layer-shape').textContent=L.shape;
+  syncDots(idx);
+
+  if(idx>0) spawnFlow(idx-1,idx,28);
+  if(idx<LAYERS.length-1)
+    setTimeout(()=>spawnFlow(idx,idx+1,14),900/s);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ORBIT
+═══════════════════════════════════════════════════════════════ */
+const orbitCenter=new THREE.Vector3(LX[3],0,0);
+let phi=0.40, theta=-0.35, radius=24;
+let autoOrbit=true, dragging=false, lmx=0,lmy=0;
+
+renderer.domElement.addEventListener('mousedown',e=>{
+  dragging=true;lmx=e.clientX;lmy=e.clientY;
+  autoOrbit=false;document.getElementById('btn-orbit').classList.remove('on');
+});
+window.addEventListener('mouseup',()=>dragging=false);
+window.addEventListener('mousemove',e=>{
+  if(!dragging)return;
+  theta-=(e.clientX-lmx)*.005;
+  phi=Math.max(.15,Math.min(1.5,phi+(e.clientY-lmy)*.005));
+  lmx=e.clientX;lmy=e.clientY;
+});
+renderer.domElement.addEventListener('wheel',e=>{
+  radius=Math.max(6,Math.min(70,radius+e.deltaY*.04));
+});
+renderer.domElement.addEventListener('touchstart',e=>{
+  dragging=true;lmx=e.touches[0].clientX;lmy=e.touches[0].clientY;
+  autoOrbit=false;document.getElementById('btn-orbit').classList.remove('on');
+},{passive:true});
+window.addEventListener('touchend',()=>dragging=false);
+window.addEventListener('touchmove',e=>{
+  if(!dragging)return;
+  theta-=(e.touches[0].clientX-lmx)*.006;
+  phi=Math.max(.15,Math.min(1.5,phi+(e.touches[0].clientY-lmy)*.006));
+  lmx=e.touches[0].clientX;lmy=e.touches[0].clientY;
+},{passive:true});
+
+/* ═══════════════════════════════════════════════════════════════
+   CONTROLS
+═══════════════════════════════════════════════════════════════ */
+const urlPred=new URLSearchParams(location.search).get('pred');
+if(urlPred) document.getElementById('pred-char').textContent=urlPred;
+
+document.getElementById('btn-play').onclick=async()=>{
+  if(playing){
+    /* pause */
+    playing=false;
+    document.getElementById('btn-play').textContent='▶ Play';
+    document.getElementById('btn-play').classList.remove('on');
+    return;
+  }
+  /* first press or after reset: (re)build layers with fresh textures */
+  if(curLayer<0){
+    document.getElementById('btn-play').textContent='⏳ Loading…';
+    document.getElementById('btn-play').classList.add('on');
+    await buildAllLayers();
+    curLayer=0; layerT=0; revealLayer(0);
+  }
+  playing=true;
+  document.getElementById('btn-play').textContent='⏸ Pause';
+  document.getElementById('btn-play').classList.add('on');
+};
+
+document.getElementById('btn-reset').onclick=()=>{
+  playing=false; curLayer=-1; layerT=0; built=false;
+  document.getElementById('btn-play').textContent='▶ Play';
+  document.getElementById('btn-play').classList.remove('on');
+  document.getElementById('layer-name').textContent='Ready';
+  document.getElementById('layer-shape').textContent='Press ▶ Play — textures load from your last prediction';
+  syncDots(-1);
+  layerGroups.forEach(g=>scene.remove(g));
+  layerGroups=[]; layerItems=[];
+  LAYERS.forEach((_,i)=>layerGlow[i]=0);
+  orbitCenter.set(LX[3],0,0);
+};
+
+document.getElementById('btn-orbit').onclick=()=>{
+  autoOrbit=!autoOrbit;
+  document.getElementById('btn-orbit').classList.toggle('on',autoOrbit);
+};
+
+/* backend ping */
+fetch(`${API}/outputs`).then(r=>r.json()).then(d=>{
+  document.getElementById('notice').innerHTML=
+    `EMNIST-balanced · 47 classes<br>${d.length} activation maps ready`;
+}).catch(()=>{
+  document.getElementById('notice').innerHTML=
+    '<span style="color:#ff3355">Backend offline<br>start app.py first</span>';
+});
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER LOOP
+═══════════════════════════════════════════════════════════════ */
+let lastT=performance.now();
+function loop(){
+  requestAnimationFrame(loop);
+  const now=performance.now(), dt=Math.min((now-lastT)/1000,.05); lastT=now;
+  const t=now*.001;
+
+  /* fade planes in */
+  layerItems.forEach((items,li)=>{
+    if(!layerGroups[li]?.visible) return;
+    items.forEach(p=>{
+      if(!p._animating) return;
+      const prog=Math.min((now-p._startTime)/p._duration,1);
+      const ease=prog*prog*(3-2*prog);
+      p.mesh.material.opacity=ease*p.targetOpacity;
+      if(p.edge) p.edge.material.opacity=ease*.42;
+      if(prog>=1) p._animating=false;
+    });
+  });
+
+  /* glow + gentle float */
+  LAYERS.forEach((_,li)=>{
+    if(!layerGroups[li]?.visible) return;
+    layerGlow[li]=Math.max(0,layerGlow[li]-dt*.4);
+    const pulse=li===curLayer?.07+.05*Math.sin(t*4.5):0;
+    layerGroups[li].position.y=Math.sin(t*.55+li*.6)*.07+pulse;
+    const gI=layerGlow[li]*.9+pulse*2.5;
+    layerItems[li].forEach(p=>{
+      if(p.mesh.material.emissive)
+        p.mesh.material.emissiveIntensity=gI+(LAYERS[li].type==='conv'?.04:.22);
+    });
+  });
+
+  /* advance sequence */
+  if(playing&&curLayer>=0){
+    layerT+=dt;
+    if(layerT>=LDUR()){
+      layerT=0;
+      const nxt=curLayer+1;
+      if(nxt<LAYERS.length){
+        curLayer=nxt; revealLayer(nxt);
+        if(nxt===LAYERS.length-1){
+          if(urlPred) setTimeout(()=>{
+            document.getElementById('pred-char').style.textShadow=
+              '0 0 40px #0ff,0 0 80px #0ff,0 0 120px #0cf';
+          },700);
+          setTimeout(()=>{
+            playing=false;
+            document.getElementById('btn-play').textContent='▶ Play';
+            document.getElementById('btn-play').classList.remove('on');
+          },LDUR()*1000);
+        }
+      }
+    }
+  }
+
+  tickFlow();
+
+  /* camera orbit */
+  if(autoOrbit) theta+=dt*.17;
+  const cx=orbitCenter.x,cy=orbitCenter.y,cz=orbitCenter.z;
+  const tx=cx+radius*Math.sin(phi)*Math.cos(theta);
+  const ty=cy+radius*Math.cos(phi)+1.5;
+  const tz=cz+radius*Math.sin(phi)*Math.sin(theta);
+  camera.position.lerp(new THREE.Vector3(tx,ty,tz),dt*2.2);
+  camera.lookAt(cx,cy+.4,cz);
+
+  renderer.render(scene,camera);
+}
+loop();
+
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>
